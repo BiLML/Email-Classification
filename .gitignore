@@ -1,0 +1,17 @@
+# Chặn môi trường ảo
+.venv/
+venv/
+ENV/
+
+# Chặn các file dữ liệu nặng sinh ra khi chạy code
+data/raw/
+data/processed/
+models/
+*.npy
+*.pkl
+*.npz
+
+# Chặn cache của Python
+__pycache__/
+*.pyc
+.pytest_cache/
