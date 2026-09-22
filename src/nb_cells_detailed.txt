@@ -1,0 +1,395 @@
+=== CELL 00 (markdown) ===
+# Lab 1: Phân loại Email (Spam/Ham) - Từ cơ bản đến nâng cao
+
+**Mục tiêu:**
+- Xây dựng một pipeline hoàn chỉnh để phân loại email.
+- Tự xây dựng các thuật toán TF-IDF, Naive Bayes, Logistic Regression, SVM từ đầu (from scratch).
+
+## Phần 1: Khởi tạo và Import thư viện
+
+=== CELL 01 (code) ===
+import os
+import sys
+import re
+import math
+import json
+import time
+from collections import Counter
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from IPython.display import display
+
+# Cấu hình hiển thị đồ thị
+plt.rcParams['figure.figsize'] = (10, 5.5)
+plt.rcParams['font.size'] = 11
+
+# Bảng Stop Words đồng nhất (sử dụng chung cho toàn bộ Pipeline)
+STOPWORDS = frozenset([
+    'the', 'a', 'an', 'to', 'of', 'and', 'is', 'in', 'it', 'this', 'that',
+    '
+
+=== CELL 02 (markdown) ===
+## Phần 2: Nạp dữ liệu và Khám phá ban đầu (EDA)
+
+Ở phần này, chúng ta sẽ đọc dữ liệu, xem xét một số mẫu, và vẽ biểu đồ phân bố nhãn `Spam` và `Ham`.
+
+=== CELL 03 (code) ===
+df = pd.read_csv('../data/raw/emails.csv')
+display(df.head())
+print(df['spam'].value_counts())
+
+# Trực quan hóa tỷ lệ phân bố nhãn Ham và Spam
+plt.figure(figsize=(6, 4))
+ax = sns.countplot(data=df, x='spam', palette=['#2ca02c', '#d62728'])
+plt.title('Phân bố nhãn Ham (0) và Spam (1)', fontweight='bold')
+plt.xlabel('Nhãn')
+plt.ylabel('Số lượng')
+plt.xticks([0, 1], ['Ham (0)', 'Spam (1)'])
+
+# Hiển thị số lượng trên từng cột
+for p in ax.patches:
+    ax.annotate(f'{int(p.get_height()):,}', (p.get_x(
+
+=== CELL 04 (markdown) ===
+## Phần 3: Tiền xử lý và Làm sạch dữ liệu
+
+Bắt đầu bằng việc kiểm tra các giá trị bị thiếu (Missing Values) để đảm bảo chất lượng dữ liệu.
+
+=== CELL 05 (code) ===
+# 1. Kiểm tra kiểu dữ liệu và giá trị thiếu (Missing Values)
+print(df.info())
+
+missing_count = df.isnull().sum()
+missing_percentage = (missing_count/len(df)) * 100
+
+missing_df = pd.DataFrame({
+    'Missing Count': missing_count,
+    'Missing Percentage (%)': missing_percentage
+})
+display(missing_df)
+
+=== CELL 06 (markdown) ===
+### Tạo đặc trưng mới: Độ dài văn bản
+
+Chúng ta thử tạo thêm cột `char_len` để phân tích độ dài các email Spam so với Ham.
+
+=== CELL 07 (code) ===
+# Bước 1: Tạo cột `char_len`
+# Nếu có giá trị NaN, sẽ được chuyển thành chuỗi rỗng để độ dài = 0
+df['char_len'] = df['text'].fillna('').astype(str).apply(len)
+
+# Bước 2: Kiểm tra toàn bộ dòng – nếu có độ dài 0 → dừng
+zero_len_idx = df.index[df['char_len'] == 0].tolist()
+
+if zero_len_idx:                               # có ít nhất 1 dòng độ dài = 0
+    # In thông tin chi tiết để bạn dễ tra cứu
+    print("Phát hiện dòng có độ dài bằng 0!")
+    print(f"Số dòng bị ảnh hưởng: {len(zero_len_idx)}")
+  
+
+=== CELL 08 (code) ===
+# Xác minh các ô “trống” thực sự là NaN
+# Kiểm tra một số giá trị đặc biệt thường được dùng làm placeholder
+placeholder_vals = ['', ' ', 'NA', 'NULL', 'nan', 'None']
+
+# Tìm các hàng mà `text` không phải NaN nhưng lại là một trong các placeholder trên
+mask_placeholder = df['text'].isin(placeholder_vals)
+
+# Nếu có, chuyển chúng thành NaN chuẩn của pandas
+if mask_placeholder.any():
+    df.loc[mask_placeholder, 'text'] = pd.NA
+    print(f"Đã chuyển {mask_placeholder.sum()} hàng placeholder thành NaN
+
+=== CELL 09 (markdown) ===
+### Xử lý Dữ liệu trùng lặp
+
+Kiểm tra và xử lý các dòng trùng lặp, xem xét sự mâu thuẫn về nhãn cho cùng một nội dung.
+
+=== CELL 10 (code) ===
+# 2. Kiểm tra và hiển thị chi tiết các dòng trùng lặp
+def n_duplicates(df):
+    count_duplicates = df.duplicated().sum()
+    print(f"Số lượng email trùng lặp phát hiện: {count_duplicates}")
+
+    if count_duplicates > 0:
+        dup_rows = df[df.duplicated(keep=False)].sort_values(by='text')
+        display(dup_rows[['text', 'spam']].head(10))
+
+n_duplicates(df)
+
+=== CELL 11 (code) ===
+# Kiểm tra các email trùng nội dung nhưng khác nhãn
+conflicts = df.groupby('text')['spam'].nunique()
+conflicting_texts = conflicts[conflicts > 1].index
+
+if len(conflicting_texts) > 0:
+    print(f"Phát hiện {len(conflicting_texts)} nội dung bị xung đột nhãn!")
+else:
+    print("Không có xung đột nhãn nào.")
+
+
+=== CELL 12 (markdown) ===
+## Phần 4: Phân tích N-gram (Bigrams)
+
+Sử dụng kỹ thuật Bigram để xem cụm 2 từ nào xuất hiện nhiều nhất trong thư rác và thư thường.
+
+=== CELL 13 (code) ===
+# Cell 1: Tính mật độ Bigram và trực quan hóa
+# Top 20 bigram đặc trưng của Ham vs Spam
+# (STOPWORDS đã khai báo ở Cell 1, imports đã có ở Cell 1)
+
+def tokenize(text):
+    tokens = re.findall(r'\b[a-zA-Z]{3,}\b', str(text).lower())
+    return [t for t in tokens if t not in STOPWORDS]
+
+def get_bigrams(text):
+    """Tạo bigram từ văn bản, bỏ qua stopwords."""
+    tokens = tokenize(text)
+    return [f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens) - 1)]
+
+# --- Tách 3 nhóm ---
+dup_mask   = df
+
+=== CELL 14 (code) ===
+# =========================================================
+# Cell 2: So sánh mật độ Top 20 Bigram Ham & Spam
+#          trong các email bị trùng lặp
+# =========================================================
+
+def calc_bigram_density_clean(group, target_bigrams):
+    n = len(group)
+    target_set = set(target_bigrams)
+    # Đếm trực tiếp từ danh sách bigram đã chuẩn hóa giống Cell 1
+    counts = {bg: 0 for bg in target_bigrams}
+    
+    for text in group['text']:
+        email_bigrams = get_big
+
+=== CELL 15 (code) ===
+# =========================================================================
+# 1. THỐNG KÊ MÔ TẢ (MEAN, MEDIAN, STD, MIN, MAX, TỨ PHÂN VỊ) & NGƯỠNG NGOẠI LAI
+# =========================================================================
+
+# char_len đã được tạo ở Cell 4, chỉ cần tạo word_count
+df['word_count'] = df['text'].fillna('').astype(str).apply(lambda x: len(x.split()))
+
+def compute_detailed_stats(series, name=""):
+    q1 = series.quantile(0.25)
+    q3 = series.quantile(0.75)
+    iqr = q3 - q1
+
+=== CELL 16 (code) ===
+# =========================================================================
+# 2. PHÂN TÍCH & TRÍCH XUẤT CÁC DẠNG NGOẠI LAI ĐẶC THÙ (ANOMALY INSPECTION)
+# =========================================================================
+# (imports đã có ở Cell 1)
+# --- Dạng 1: Ngoại lai thống kê (Nằm ngoài ngưỡng IQR: Cực ngắn hoặc Siêu dài) ---
+q1_c = df['char_len'].quantile(0.25)
+q3_c = df['char_len'].quantile(0.75)
+iqr_c = q3_c - q1_c
+upper_limit = q3_c + 1.5 * iqr_c
+
+short_outliers = df[df['char_len'
+
+=== CELL 17 (markdown) ===
+### Loại bỏ các dòng trùng lặp cuối cùng
+
+Thực hiện xóa các dữ liệu trùng sau khi đã phân tích xong để tránh rò rỉ dữ liệu.
+
+=== CELL 18 (code) ===
+df = df.drop_duplicates().reset_index(drop=True)
+print(f"\nKích thước sau khi loại bỏ trùng lặp: {df.shape[0]} dòng, {df.shape[1]} cột")
+n_duplicates(df)
+
+=== CELL 19 (code) ===
+# =========================================================================
+# PHASE 4: TEXT CLEANING & TOKENIZATION (TIỀN XỬ LÝ & TÁCH TỪ CHUẨN HÓA)
+# =========================================================================
+# (STOPWORDS đã khai báo ở Cell 1, imports đã có ở Cell 1)
+
+# 1. Định nghĩa các mẫu biểu thức chính quy (Regex Patterns)
+URL_RE = re.compile(r'https?://\S+|www\.\S+')
+EMAIL_RE = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
+MONEY_RE = re.compile(r'\$\d+(
+
+=== CELL 20 (markdown) ===
+## Phần 5: Xây dựng TF-IDF Vectorizer từ đầu (From Scratch)
+
+TF-IDF là một phương pháp cốt lõi trong NLP. Chúng ta sẽ xây dựng lớp `TfidfVectorizerScratch` để tự tính toán trọng số này.
+
+=== CELL 21 (code) ===
+class TfidfVectorizerScratch:
+    def __init__(self, max_features: int = 2500, min_df: int = 3):
+        self.max_features = max_features  # Kích thước từ vựng tối đa
+        self.min_df = min_df              # Số tài liệu tối thiểu từ phải xuất hiện
+        self.vocabulary_ = {}             # Ánh xạ từ -> index cột {word: col_idx}
+        self.idf_ = None                  # Mảng trọng số IDF của từng từ
+
+    def fit(self, tokenized_docs: list):
+        N = len(tokenized_docs)
+        doc_freq =
+
+=== CELL 22 (code) ===
+# =========================================================================
+# PHASE 6: STRATIFIED SPLIT → TF-IDF FIT (CHỈ TRÊN TRAIN) → TRANSFORM
+# =========================================================================
+# ⚠️ Nguyên tắc Data Leakage Prevention:
+#    Vocabulary và trọng số IDF chỉ được học trên tập Train,
+#    sau đó áp dụng biến đổi trên tập Val/Test mà TUYỆT ĐỐI KHÔNG FIT LẠI.
+
+# Bước 1: Chuẩn bị dữ liệu tokens và nhãn
+all_tokens = df_clean['tokens'].tolist()
+y_all = df_clean[
+
+=== CELL 23 (markdown) ===
+## Phần 6: Xây dựng các Mô hình Học Máy từ đầu
+
+Thay vì dùng thư viện có sẵn, chúng ta sẽ cài đặt ba thuật toán classification phổ biến:
+1. **Multinomial Naive Bayes**
+2. **Logistic Regression**
+3. **Linear SVM**
+
+=== CELL 24 (code) ===
+class MultinomialNaiveBayesScratch:
+    def __init__(self, alpha: float = 1.0):
+        self.alpha = alpha                # Hệ số làm mịn Laplace
+        self.class_priors_ = None         # log P(y)
+        self.feature_log_prob_ = None     # log P(w_j | y)
+        self.classes_ = None
+
+    def fit(self, X: np.ndarray, y: np.ndarray):
+        self.classes_ = np.unique(y)
+        n_classes = len(self.classes_)
+        n_features = X.shape[1]
+
+        self.class_priors_ = np.zeros(n_classes, dtype
+
+=== CELL 25 (code) ===
+class LogisticRegressionScratch:
+    def __init__(self, lr: float = 1.5, n_iters: int = 300, l2_reg: float = 0.001):
+        self.lr = lr                      # Learning rate
+        self.n_iters = n_iters            # Số vòng lặp Gradient Descent
+        self.l2_reg = l2_reg              # Hệ số điều chuẩn L2
+        self.weights_ = None              # Vector trọng số w
+        self.bias_ = 0.0                  # Hệ số tự do b
+
+    def _sigmoid(self, z: np.ndarray) -> np.ndarray:
+        return
+
+=== CELL 26 (code) ===
+class LinearSVMScratch:
+    def __init__(self, lr: float = 1.0, n_iters: int = 300, l2_reg: float = 0.001):
+        self.lr = lr                      # Learning rate
+        self.n_iters = n_iters            # Số vòng lặp
+        self.l2_reg = l2_reg              # Hệ số điều chuẩn L2
+        self.weights_ = None              # Vector trọng số w
+        self.bias_ = 0.0                  # Bias b
+
+    def fit(self, X: np.ndarray, y: np.ndarray):
+        n_samples, n_features = X.shape
+        y_s
+
+=== CELL 27 (markdown) ===
+## Phần 7: Hàm Đánh giá (Evaluation Metrics)
+
+Viết hàm để dễ dàng tính toán Accuracy, Precision, Recall và F1-Score.
+
+=== CELL 28 (code) ===
+def compute_classification_metrics(y_true: np.ndarray, y_pred: np.ndarray, model_name: str = "Model") -> dict:
+    tp = int(np.sum((y_true == 1) & (y_pred == 1)))
+    tn = int(np.sum((y_true == 0) & (y_pred == 0)))
+    fp = int(np.sum((y_true == 0) & (y_pred == 1)))
+    fn = int(np.sum((y_true == 1) & (y_pred == 0)))
+
+    total = len(y_true)
+    accuracy = (tp + tn) / total if total > 0 else 0.0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0
+
+=== CELL 29 (markdown) ===
+### Đánh giá các mô hình trên tập Validation
+
+Huấn luyện và so sánh xem thuật toán nào hoạt động tốt nhất trước khi tinh chỉnh.
+
+=== CELL 30 (code) ===
+# 2. Đánh giá và so sánh 3 mô hình trên tập Validation
+val_results = [
+    compute_classification_metrics(y_val, nb_model.predict(X_val), "Multinomial Naive Bayes"),
+    compute_classification_metrics(y_val, lr_model.predict(X_val), "Logistic Regression"),
+    compute_classification_metrics(y_val, svm_model.predict(X_val), "Linear SVM")
+]
+
+val_summary_df = pd.DataFrame(val_results)[["Model", "Accuracy", "Precision", "Recall", "F1-Score", "TN", "FP", "FN", "TP"]]
+display(val_summary_df)
+
+# 3. Trự
+
+=== CELL 31 (markdown) ===
+## Phần 8: Tinh chỉnh ngưỡng quyết định (Threshold Tuning)
+
+Các mô hình thường dùng ngưỡng xác suất 0.5. Ta sẽ quét ngưỡng từ 0.1 đến 0.9 để tìm ngưỡng cho F1-Score cao nhất.
+
+=== CELL 32 (code) ===
+# 1. Quét ngưỡng quyết định (Threshold Tuning) trên tập Validation cho Naive Bayes & Logistic Regression
+thresholds = np.linspace(0.1, 0.9, 17)
+nb_probs_val = nb_model.predict_proba(X_val)[:, 1]
+lr_probs_val = lr_model.predict_proba(X_val)
+
+nb_threshold_stats = []
+for t in thresholds:
+    pred = (nb_probs_val >= t).astype(int)
+    m = compute_classification_metrics(y_val, pred)
+    nb_threshold_stats.append({"Threshold": round(t, 2), "Precision": m["Precision"], "Recall": m["Recall"], "F1": m["F
+
+=== CELL 33 (markdown) ===
+## Phần 9: Kiểm thử cuối cùng trên tập Test
+
+Áp dụng mô hình và ngưỡng quyết định tốt nhất lên dữ liệu kiểm thử thực tế.
+
+=== CELL 34 (code) ===
+# 2. Đánh giá kiểm thử cuối cùng trên Test Set với Mô hình Tối ưu
+BEST_THRESHOLD = 0.50
+
+test_results = [
+    compute_classification_metrics(y_test, nb_model.predict(X_test, threshold=BEST_THRESHOLD), "Multinomial Naive Bayes"),
+    compute_classification_metrics(y_test, lr_model.predict(X_test, threshold=BEST_THRESHOLD), "Logistic Regression"),
+    compute_classification_metrics(y_test, svm_model.predict(X_test, threshold=BEST_THRESHOLD), "Linear SVM")
+]
+
+test_summary_df = pd.DataFrame(test_res
+
+=== CELL 35 (markdown) ===
+## Phần 10: Lưu trữ và Tái sử dụng mô hình
+
+Cuối cùng, đóng gói các trọng số của mô hình thành file JSON để tiện lợi cho việc triển khai (deployment).
+
+=== CELL 36 (code) ===
+def save_trained_model(
+    model,
+    vectorizer,
+    best_accuracy: float,
+    best_f1_score: float,
+    threshold: float = 0.50,
+    model_path: str = None
+) -> str:
+    """Đóng gói và lưu metadata, từ vựng và trọng số mô hình sang file JSON.
+    Hỗ trợ: MultinomialNaiveBayesScratch, LogisticRegressionScratch, LinearSVMScratch.
+    """
+    if model_path is None:
+        model_dir = 'models' if os.path.exists('data') else '../models'
+        model_path = os.path.join(model_dir, 'email_classifi
+
+=== CELL 37 (code) ===
+def load_trained_email_model(model_path: str = None) -> dict:
+    """Tự động tìm kiếm và nạp trọng số mô hình từ file JSON."""
+    if model_path is None:
+        candidates = ['models/email_classifier.json', '../models/email_classifier.json', 'email_classifier.json']
+        for p in candidates:
+            if os.path.exists(p):
+                model_path = p
+                break
+        if model_path is None:
+            raise FileNotFoundError('Không tìm thấy file model email_classifier.json 
+
